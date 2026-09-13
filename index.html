@@ -915,7 +915,10 @@ async function playExample(){
   if(!textEl) return;
   const text = textEl.textContent;
   if(!window.speechSynthesis){ alert('您的瀏覽器不支援語音朗讀功能。'); return; }
-  window.speechSynthesis.cancel();
+  // 只有真的正在講話時才 cancel()，一般單次點擊不會觸發 cancel+speak race，
+  // 也就不需要靠延遲來閃避，Safari（尤其 iOS）才不會因為 speak() 沒有
+  // 緊接在使用者點擊的同一輪事件圈裡執行，而被判定不是使用者操作、靜音失敗。
+  if(window.speechSynthesis.speaking){ window.speechSynthesis.cancel(); }
   if(!cachedVoices.length) cachedVoices = await loadVoicesOnce();
   const wantLang = currentScript==='s' ? 'zh-CN' : 'zh-TW';
   let voice = null;
@@ -937,8 +940,18 @@ async function playExample(){
   utter.onstart = () => { ttsKeepAlive(); };
   utter.onend = () => { clearInterval(ttsKeepAliveTimer); if(btn){ btn.disabled = false; btn.textContent = '🔊　' + (currentScript==='s'?'朗读例句':'朗讀例句'); } };
   utter.onerror = () => { clearInterval(ttsKeepAliveTimer); if(btn){ btn.disabled = false; btn.textContent = '🔊　' + (currentScript==='s'?'朗读例句':'朗讀例句'); } };
-  // 排到下一輪事件圈再 speak()，避開 cancel() 之後立刻 speak() 有機率吃掉聲音的 bug
-  setTimeout(() => { window.speechSynthesis.speak(utter); }, 60);
+  // 重要：speak() 一定要在使用者點擊的同一輪事件圈裡「同步」呼叫，
+  // 不能包在 setTimeout／額外的 await 裡，否則 Safari（尤其 iOS）
+  // 會判定這不是使用者操作，直接靜音、不報任何錯誤。
+  window.speechSynthesis.speak(utter);
+  // Chrome 有個已知 bug：cancel() 之後太快呼叫 speak()，有機率整段被吃掉、
+  // 完全沒聲音卻也不觸發 onerror。這裡只在偵測到「該講但沒在講」時才補講一次；
+  // Safari 通常這時候已經在講了，不會觸發這個補救。
+  setTimeout(() => {
+    if(btn && btn.disabled && !window.speechSynthesis.speaking){
+      window.speechSynthesis.speak(utter);
+    }
+  }, 200);
 }
 </script>
 
