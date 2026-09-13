@@ -880,20 +880,27 @@ function escapeHtml(s){
 
 /* ================= TTS ================= */
 let cachedVoices = [];
-function loadVoicesOnce(){
-  return new Promise(resolve => {
-    let v = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
-    if(v && v.length){ resolve(v); return; }
-    if(!window.speechSynthesis){ resolve([]); return; }
-    window.speechSynthesis.onvoiceschanged = () => resolve(window.speechSynthesis.getVoices());
-    setTimeout(()=>resolve(window.speechSynthesis.getVoices()||[]), 800);
-  });
+let ttsLastError = ''; // 除錯用：記錄最近一次找不到聲音／播放失敗的原因
+function refreshCachedVoices(){
+  if(!window.speechSynthesis) return;
+  const v = window.speechSynthesis.getVoices();
+  if(v && v.length) cachedVoices = v;
 }
-// 預先在頁面載入時就把語音清單載好，避免第一次點播放時
-// 因為要等 await 才觸發 speak()，导致部分瀏覽器（尤其 iOS Safari）
-// 判定不是「使用者操作當下」而靜音、不報錯地播放失敗。
+// 持續、反覆地嘗試把語音清單載好（不是只試一次就放棄），
+// 避免某些 iOS Safari 版本從頭到尾都不觸發 onvoiceschanged、
+// 也可能超過 800ms 才真的有清單，導致 cachedVoices 永遠是空的。
+// 這裡完全不靠「點擊時 await」來補救——因為即使是已經 resolve 的
+// Promise，await 一次也可能讓 Safari 判定不是「使用者操作當下」而
+// 整段靜音。點擊當下一律只用當時已經快取好的 cachedVoices，同步呼叫。
 if(window.speechSynthesis){
-  loadVoicesOnce().then(v => { cachedVoices = v || []; });
+  refreshCachedVoices();
+  window.speechSynthesis.onvoiceschanged = refreshCachedVoices;
+  let voicePollTries = 0;
+  const voicePoll = setInterval(() => {
+    voicePollTries++;
+    refreshCachedVoices();
+    if(cachedVoices.length || voicePollTries > 30){ clearInterval(voicePoll); } // 最多輪詢約 15 秒
+  }, 500);
 }
 // Chrome 有個已知 bug：speechSynthesis.cancel() 之後太快呼叫 speak()，
 // 有機率整段被吃掉、完全沒聲音卻也不觸發 onerror。用一顆很短的
@@ -909,7 +916,22 @@ function ttsKeepAlive(){
   }, 4000);
 }
 
-async function playExample(){
+function ttsShowDiag(msg, isError){
+  const btn = document.getElementById('audioBtn');
+  let box = document.getElementById('ttsDiagBox');
+  if(!box){
+    box = document.createElement('div');
+    box.id = 'ttsDiagBox';
+    box.style.cssText = 'margin-top:8px;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-wrap;text-align:left;';
+    if(btn && btn.parentNode){ btn.parentNode.insertBefore(box, btn.nextSibling); }
+  }
+  box.style.background = isError ? '#fff3cd' : '#e6f7ee';
+  box.style.color = isError ? '#7a5b00' : '#1a6b3c';
+  box.style.border = '1px solid ' + (isError ? '#ffe08a' : '#9fdcbb');
+  box.textContent = msg;
+}
+
+function playExample(){
   const btn = document.getElementById('audioBtn');
   const textEl = document.getElementById('exampleText');
   if(!textEl) return;
@@ -919,7 +941,10 @@ async function playExample(){
   // 也就不需要靠延遲來閃避，Safari（尤其 iOS）才不會因為 speak() 沒有
   // 緊接在使用者點擊的同一輪事件圈裡執行，而被判定不是使用者操作、靜音失敗。
   if(window.speechSynthesis.speaking){ window.speechSynthesis.cancel(); }
-  if(!cachedVoices.length) cachedVoices = await loadVoicesOnce();
+  // 不 await 任何東西：即使是已經 resolve 的 Promise，await 一次也可能讓
+  // Safari 判定這不是「使用者操作當下」而整段靜音。這裡一律用當下已經
+  // 快取好的 cachedVoices，同步往下執行到 speak()。
+  refreshCachedVoices();
   const wantLang = currentScript==='s' ? 'zh-CN' : 'zh-TW';
   let voice = null;
   if(currentScript==='s'){
@@ -935,6 +960,7 @@ async function playExample(){
     // 這台裝置／瀏覽器根本沒有任何中文語音可用：寧可清楚提示，
     // 也不要硬用英文引擎去亂唸中文字（那就是之前「亂念一通像亂碼」的成因）。
     alert('這台裝置目前偵測不到中文語音，暫時無法正確朗讀例句。\n建議改用 Chrome 瀏覽器，或確認系統已安裝中文語音。');
+    ttsShowDiag('⚠️ 找不到中文語音（目前偵測到 ' + cachedVoices.length + ' 種語音）。\n請確認：①裝置沒有靜音、音量沒關 ②系統已安裝中文語音。', true);
     return;
   }
 
@@ -944,9 +970,13 @@ async function playExample(){
   utter.rate = 0.78;
   utter.pitch = 1.0;
   if(btn){ btn.disabled = true; btn.textContent = '🔊　播放中…'; }
-  utter.onstart = () => { ttsKeepAlive(); };
+  utter.onstart = () => { ttsKeepAlive(); ttsShowDiag('▶️ 使用語音：' + voice.name + '（' + voice.lang + '）', false); };
   utter.onend = () => { clearInterval(ttsKeepAliveTimer); if(btn){ btn.disabled = false; btn.textContent = '🔊　' + (currentScript==='s'?'朗读例句':'朗讀例句'); } };
-  utter.onerror = () => { clearInterval(ttsKeepAliveTimer); if(btn){ btn.disabled = false; btn.textContent = '🔊　' + (currentScript==='s'?'朗读例句':'朗讀例句'); } };
+  utter.onerror = (e) => {
+    clearInterval(ttsKeepAliveTimer);
+    if(btn){ btn.disabled = false; btn.textContent = '🔊　' + (currentScript==='s'?'朗读例句':'朗讀例句'); }
+    ttsShowDiag('❌ 播放失敗，瀏覽器回報原因：' + (e && e.error ? e.error : '未知') + '\n（若是 not-allowed，通常代表裝置靜音或瀏覽器封鎖了這次播放）', true);
+  };
   // 重要：speak() 一定要在使用者點擊的同一輪事件圈裡「同步」呼叫，
   // 不能包在 setTimeout／額外的 await 裡，否則 Safari（尤其 iOS）
   // 會判定這不是使用者操作，直接靜音、不報任何錯誤。
