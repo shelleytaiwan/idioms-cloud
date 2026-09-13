@@ -931,6 +931,13 @@ async function playExample(){
        || cachedVoices.find(v => v.lang && v.lang.toLowerCase().startsWith('zh') && (currentScript==='s' ? !/TW|HK/i.test(v.lang) : /TW|HK/i.test(v.lang)))
        || cachedVoices.find(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
 
+  if(!voice){
+    // 這台裝置／瀏覽器根本沒有任何中文語音可用：寧可清楚提示，
+    // 也不要硬用英文引擎去亂唸中文字（那就是之前「亂念一通像亂碼」的成因）。
+    alert('這台裝置目前偵測不到中文語音，暫時無法正確朗讀例句。\n建議改用 Chrome 瀏覽器，或確認系統已安裝中文語音。');
+    return;
+  }
+
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = voice ? voice.lang : wantLang;
   if(voice) utter.voice = voice;
